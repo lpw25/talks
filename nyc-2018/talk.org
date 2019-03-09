@@ -1,0 +1,751 @@
+#+TITLE: Effective
+#+TITLE: programming
+
+#+AUTHOR: Leo White
+
+~Stephen Dolan, Matija Pretnar, Daniel Hillerström, KC Sivaramakrishnan~
+#+PROPERTY: header-args :results verbatim
+#+STARTUP: latexpreview
+#+LATEX_HEADER: \usepackage{bussproofs}
+#+LATEX_HEADER: \usepackage{multicol}
+#+LATEX_HEADER: \newcommand{\Et}{\mathrel{\Op{;}}}
+#+LATEX_HEADER: \newcommand{\HasType}{\mathrel{\Op{:}}}
+#+LATEX_HEADER: \newcommand{\HasEffect}{\mathrel{\Op{!}}}
+#+LATEX_HEADER: \newcommand{\VDash}{\mathrel{\Op{\vdash}}}
+#+LATEX_HEADER: \newcommand{\Row}{\ensuremath{\Delta}}
+#+LATEX_HEADER: \newcommand{\RowTo}{\xrightarrow{\Row}}
+
+* Effects
+
+** Side-effects
+
+   Observable effects of a computation other than its return value
+
+** Algebraic effects
+
+   Represent side effects as sets of operations that interact with
+   the context of a computation.
+
+* Effects
+
+When we need to execute an effectful operation:
+#+BEGIN_SRC ocaml :eval never
+    let x = get () in
+    set (x + 1)
+#+END_SRC
+We can pause execution:
+#+BEGIN_SRC ocaml :eval never
+    let x = ?? in
+    set (x + 1)
+#+END_SRC
+and ask the context to execute a ~get()~ for us and return
+the resulting value:
+#+BEGIN_SRC ocaml :eval never
+    let x = 5 in
+    set (x + 1)
+#+END_SRC
+By thinking of effects this way we separate the specification
+of how to execute pure computations from the specification
+of how side-effects behave.
+
+* Concurrency
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let rec foo id depth =
+  if depth > 0 then begin
+    Printf.printf "Forking %d\n" (id * 2 + 1);
+    perform (Fork (fun () -> foo (id * 2 + 1) (depth - 1)));
+    Printf.printf "Forking %d\n" (id * 2 + 2);
+    perform (Fork (fun () -> foo (id * 2 + 2) (depth - 1)))
+  end else begin
+    Printf.printf "Yielding in %d\n" id;
+    perform Yield;
+    Printf.printf "Resumed number %d\n" id;
+  end
+#+END_SRC
+#+RESULTS:
+
+* Scheduler
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let schedule f =
+  let run_q = Queue.create () in
+  let rec fork f =
+    match f () with
+    | () ->
+        if Queue.is_empty run_q then ()
+        else continue (Queue.pop run_q) ()
+    | effect Yield k ->
+        Queue.push k run_q; continue (Queue.pop run_q) ()
+    | effect (Fork f) k ->
+        Queue.push k run_q; fork f
+  in
+  fork f
+#+END_SRC
+#+RESULTS:
+
+* Scheduler
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let () = schedule (fun () -> foo 0 3)
+#+END_SRC
+#+RESULTS:
+
+* Exceptions
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let rec find p = function
+  | [] -> raise Not_found
+  | x :: xs -> if p x then x else find p xs
+#+END_SRC
+#+RESULTS:
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let x = find (fun i -> i mod 2 = 0) [1; 3; 4] in
+x + 2
+#+END_SRC
+#+RESULTS:
+
+* Exception Handlers
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let x =
+  try
+    let x = find (fun i -> i mod 2 = 0) [1; 3; 5] in
+    Some (x + 2)
+  with Not_found -> None
+#+END_SRC
+#+RESULTS:
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let x =
+  match find (fun i -> i mod 2 = 0) [1; 3; 4] with
+  | y -> Some (y + 2)
+  | exception Not_found -> None
+#+END_SRC
+#+RESULTS:
+
+* Generators
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let evens () =
+  let x = ref 0 in
+  while true do
+    if !x mod 2 = 0 then
+      perform (Return !x);
+    incr x
+  done
+#+END_SRC
+#+RESULTS:
+
+* Generators
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let total n f =
+  let count = ref 0 in
+  let total = ref 0 in
+  match f () with
+  | () -> !total
+  | effect (Return x) k ->
+      total := !total + x;
+      count := !count + 1;
+      if !count >= n then !total
+      else continue k ()
+
+let x = total 5 evens
+#+END_SRC
+#+RESULTS:
+
+* State
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let factorial n =
+  perform (Set 1);
+  for i = 1 to n do
+    let x = perform Get in
+    perform (Set (x * i));
+  done;
+  perform Get
+#+END_SRC
+#+RESULTS:
+
+* State
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let run f x =
+  let comp =
+    match f x with
+    | res -> fun _ -> res
+    | effect Get k -> fun (s : int) -> (continue k s) s
+    | effect (Set s') k -> fun _ -> (continue k ()) s'
+  in
+  comp 0
+let x = run factorial 5
+#+END_SRC
+#+RESULTS:
+
+* Implemenation
+
+#+BEGIN_SRC ocaml :eval never
+           match ...body... with
+           | x -> ...return...
+           | effect E, k -> ...handler...
+#+END_SRC
+
+- Entering an effect handler creates a fresh stack
+
+- These stacks are heap allocated and dynamically resized
+  (~10s of bytes initially)
+
+- Performing an effect wraps the current stack in a continuation
+  and executes the handler on the previous stack
+
+- Continuing a continuation reinstantes the paused stack and
+  resumes its execution
+
+* Unhandled effects
+
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let x = find (fun i -> i mod 2 = 0) [1; 3; 5]
+#+END_SRC
+#+RESULTS:
+
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let x = evens ()
+#+END_SRC
+#+RESULTS:
+
+* Monads
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let return x = Ok x
+
+let (>>=) m f =
+  match m with
+  | Error _ as err -> err
+  | Ok x -> f x
+
+let error e = Error e
+#+END_SRC
+#+RESULTS:
+
+* Monads
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let rec findm p = function
+  | [] -> error `Not_found
+  | x :: xs ->
+    if p x then return x else findm p xs
+
+let x =
+  findm (fun i -> i mod 2 = 0) [1; 3; 4] >>= fun y ->
+  return (y + 2)
+#+END_SRC
+#+RESULTS:
+
+* Monads
+
+** Monadic versions of higher-order functions
+
+#+BEGIN_SRC ocaml :eval never
+   val map : ('a -> 'b) -> 'a list -> 'b list
+   val mapm : ('a -> 'b monad) -> 'a list -> 'b list monad
+#+END_SRC
+
+** Composition
+
+   - Using multiple effects in the same expression is awkward
+   - Monad transformers are pretty unwieldy
+
+** Performance
+
+   - A lot of allocation for intermediate data structures and closures.
+   - Good performance relies heavily on compiler optimisation
+
+* Effect systems
+
+** Infer an effect for each expression
+
+\begin{prooftree}
+{\color{black}.}\hspace{7em}
+\AxiomC{$\Gamma \VDash e
+         \HasType t \HasEffect \Row $}
+\end{prooftree}
+
+** Attach these effects to function types
+
+\begin{prooftree}
+{\color{black}.}\hspace{6em}
+\AxiomC{$\Gamma \Et x \HasType A \VDash e
+         \HasType B \HasEffect \Row $}
+\alwaysSingleLine
+\UnaryInfC{$\Gamma \VDash \lambda x . e
+            \HasType A \RowTo B \HasEffect 0 $}
+\end{prooftree}
+
+\begin{prooftree}
+{\color{black}.}\hspace{3em}
+\AxiomC{$\Gamma \VDash e
+         \HasType A \RowTo B
+         \HasEffect \Row^\prime $}
+\AxiomC{$\Gamma \VDash e^\prime
+         \HasType A \HasEffect \Row^{\prime\prime} $}
+\alwaysSingleLine
+\BinaryInfC{$\Gamma \VDash e \; e^\prime
+             \HasType B \HasEffect \Row + \Row^\prime + \Row^{\prime\prime}$}
+\end{prooftree}
+
+* Effect systems
+
+** Infer an effect for each expression
+
+   ~perform Get("hello") + 1~  has type ~int~ and effect
+   ~[Get : string -> int]~
+
+** Attach these effects to function types
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let f () =
+  perform Get("hello") + 1
+#+END_SRC
+#+RESULTS:
+
+* Effect descrptions
+
+- Effect types describe the stack of effect handlers
+  required to execute them
+
+- They consist of lists of effects
+
+- Effects with different labels can be permuted
+
+- Effects with the same label cannot be permuted.
+  ~[Get : int | Get : string]~ must have an inner handler of ~Get~ with
+  type ~int~ and an outer handler of ~Get~ with type ~string~.
+
+* Effect types
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let rec hd = function
+  | [] -> throw Empty()
+  | x :: xs -> x
+#+END_SRC
+#+RESULTS:
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let x = hd [1;2]
+#+END_SRC
+#+RESULTS:
+
+* Effect types
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let evens () =
+  let x = ref 0 in
+  while true do
+    if !x mod 2 = 0 then
+      perform Return(!x);
+    incr x
+  done
+#+END_SRC
+#+RESULTS:
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let x = evens ()
+#+END_SRC
+#+RESULTS:
+
+* Effect variables
+
+** Higher-order functions require effect variables
+
+#+BEGIN_SRC ocaml :eval never
+val map : ('a -[!e]-> 'b) -> 'a list -[!e]-> 'b list
+#+END_SRC
+
+** A bit of syntactic sugar makes this easier
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let rec map f = function
+  | [] -> []
+  | x :: xs -> f x :: map f xs
+#+END_SRC
+#+RESULTS:
+
+* Typed concurrency
+
+
+* Typed concurrency
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+#load "fibers.cma";;
+open FiberM.O
+
+let rec say s1 s2 i =
+  if i <= 0 then FiberM.return ()
+  else begin
+    Printf.printf "%s\n" s1;
+    FiberM.yield () >>= fun () ->
+    Printf.printf "%s\n" s2;
+    say s1 s2 (i - 1)
+  end
+
+let thread =
+  FiberM.fork
+    (fun () -> say "Hello" "World" 5)
+  >>= fun fut ->
+  Printf.printf "Goodbye\n";
+  FiberM.yield () >>= fun () ->
+  Printf.printf "Goodbye\n";
+  FiberM.Future.wait fut >>| fun () ->
+  Printf.printf "Done\n"
+#+END_SRC
+#+RESULTS:
+
+* Typed concurrency
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let () = FiberM.run thread
+#+END_SRC
+#+RESULTS:
+
+* Typed concurrency
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let rec say s1 s2 i =
+  if i > 0 then begin
+    Printf.printf "%s\n" s1;
+    Fiber.yield ();
+    Printf.printf "%s\n" s2;
+    say s1 s2 (i - 1)
+  end
+
+let thread () =
+  let fut =
+    Fiber.fork (fun () -> say "Hello" "World" 5)
+  in
+  Printf.printf "Goodbye\n";
+  Fiber.yield ();
+  Printf.printf "Goodbye\n";
+  Fiber.Future.wait fut;
+  Printf.printf "Done\n"  
+#+END_SRC
+#+RESULTS:
+
+* Typed concurrency
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let () = Fiber.run thread ()
+#+END_SRC
+#+RESULTS:
+
+* Typed concurrency
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let overexcited () =
+  let futs =
+    List.map
+      (fun msg -> Fiber.fork (fun () -> say msg msg 5))
+      ["One"; "Two"; "Three"; "Four"; "Five"]
+  in
+  List.iter Fiber.Future.wait futs
+
+let () = Fiber.run overexcited ()
+#+END_SRC
+#+RESULTS:
+
+* Typed concurrency
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let rec assoc_wait key l =
+  match l with
+  | [] -> throw Not_found()
+  | fut :: futs ->
+      let (key', value) = Fiber.Future.wait fut in
+      if key = key' then true else assoc_wait key futs
+#+END_SRC
+#+RESULTS:
+
+* State with references
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let factorial n =
+  let r = ref 1 in
+  for i = 1 to n do
+    let x = !r in
+    r := x * i;
+  done;
+  !r
+#+END_SRC
+#+RESULTS:
+
+* State with references
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let factorial n =
+  let r = perform New(1) in
+  for i = 1 to n do
+    let x = perform Get(r) in
+    perform Set(r, (x * i));
+  done;
+  perform Get(r)
+#+END_SRC
+#+RESULTS:
+
+* State with references
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let run f x =
+  let module Store = Map.Make(Int) in
+  let comp =
+    match f x with
+    | res -> fun _ -> res
+    | effect New(v), k ->
+        fun (s, c) -> continue k c ((Store.add c v s), c + 1)
+    | effect Get(l), k ->
+        fun (s, c) -> continue k (Store.find l s) (s, c)
+    | effect Set(l, v), k ->
+        fun (s, c) -> continue k () (Store.add l v s, c)
+  in
+  comp (Store.empty, 0)
+#+END_SRC
+#+RESULTS:
+
+* State with references
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let x = run factorial 5
+#+END_SRC
+#+RESULTS:
+
+* I/O
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let title () =
+  let ic = open_in "./talk.org" in
+  let buf = Bytes.create 21 in
+  seek_in ic 9;
+  let _ = input ic buf 0 9 in
+  seek_in ic 27;
+  let _ = input ic buf 9 12 in
+  print_endline (Bytes.to_string buf)
+let () = title ()
+#+END_SRC
+#+RESULTS:
+
+* I/O
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let title () =
+  let ic = perform Open_in("./talk.org") in
+  let buf = Bytes.create 21 in
+  perform Seek_in(ic, 9);
+  let _ = perform Input(ic, buf, 0, 9) in
+  perform Seek_in(ic, 27);
+  let _ = perform Input(ic, buf, 9, 12) in
+  perform Print_endline(Bytes.to_string buf)
+#+END_SRC
+#+RESULTS:
+
+* The ~io~ effect
+
+** Add an effect ~io~
+
+#+BEGIN_SRC ocaml :eval never
+val print_endline : string -[io]-> unit
+#+END_SRC
+
+** A bit of syntactic sugar makes this easier
+
+#+BEGIN_SRC ocaml :session effects :cmd ~/Repositories/ocaml-effects/_install/bin/ocaml
+let impure s = print_endline s
+let pure i = i + 1
+#+END_SRC
+#+RESULTS:
+
+* The ~io~ effect
+
+#+BEGIN_SRC ocaml :session effects :cmd ~/Repositories/ocaml-effects/_install/bin/ocaml
+let create () = [|1; 2; 3|]
+let get a = a.(0)
+let set a x = a.(0) <- x
+#+END_SRC
+#+RESULTS:
+
+* The ~io~ effect
+
+#+BEGIN_SRC ocaml :session effects :cmd ~/Repositories/ocaml-effects/_install/bin/ocaml
+let empty () = []
+let cons x l = x :: l
+let hd = function
+  | [] -> raise (Failure "hd: list not empty")
+  | x :: _ -> x
+#+END_SRC
+#+RESULTS:
+
+* In practice
+
+** The standard library is 101 files totalling
+** 23675 lines
+#+BEGIN_EXAMPLE
+     72 files changed, 3 insertions(+),
+     160 deletions(-), 4618 modifications(!)
+#+END_EXAMPLE
+
+* Local state
+
+#+BEGIN_SRC ocaml :session effects :cmd ~/Repositories/ocaml-effects/_install/bin/ocaml
+let factorial n =
+  let r : int ref = ref 1 in
+  for i = 1 to n do
+    let x = !r in
+    r := x * i;
+  done;
+  !r
+#+END_SRC
+#+RESULTS:
+
+* Local state
+
+#+BEGIN_SRC ocaml :session effects-simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let run f x =
+  let module Store = Map.Make(Int) in
+  let comp =
+    match f x with
+    | res -> fun _ -> res
+    | effect New(v), k ->
+        fun (s, c) -> continue k c ((Store.add c v s), c + 1)
+    | effect Get(l), k ->
+        fun (s, c) -> continue k (Store.find l s) (s, c)
+    | effect Set(l, v), k ->
+        fun (s, c) -> continue k () (Store.add l v s, c)
+  in
+  comp (Store.empty, 0)
+#+END_SRC
+#+RESULTS:
+
+* Local state
+
+#+BEGIN_SRC ocaml :eval never
+type 'a ref
+
+val ref : 'a -> 'a ref
+
+val ( ! ) : 'a ref -> 'a
+
+val ( := ) : 'a ref ->> 'a -> unit
+#+END_SRC
+
+* Regions
+
+#+BEGIN_SRC ocaml :eval never
+type ('a, @r) rref
+
+val ref : 'a -[@r state]->> ('a, @r) rref
+
+val ( ! ) : ('a, @r) rref -[@r state]->> 'a
+
+val ( := ) : ('a, @r) rref ->> 'a -[@r state]->> unit
+
+type 'a ref = ('a, global) rref
+#+END_SRC
+
+* Regions
+
+#+BEGIN_SRC ocaml :session effects :cmd ~/Repositories/ocaml-effects/_install/bin/ocaml
+let factorial n =
+  let r = ref 1 in
+  for i = 1 to n do
+    let x = !r in
+    r := x * i;
+  done;
+  !r
+#+END_SRC
+#+RESULTS:
+
+* Regions
+
+#+BEGIN_SRC ocaml :session effects :cmd ~/Repositories/ocaml-effects/_install/bin/ocaml
+type ('a, @r) rref = { mutable(@r) contents : 'a }
+
+let get r = r.contents
+#+END_SRC
+#+RESULTS:
+
+* Future work
+** Lifting
+
+#+BEGIN_SRC ocaml :session effects :cmd ~/Repositories/ocaml-effects/_install/bin/ocaml
+type 'a tree = Leaf of 'a | Branch of 'a tree * 'a tree
+
+let exists p t =
+  let rec loop = function
+  | Leaf x -> if p x then throw Found() else ()
+  | Branch(l, r) -> loop l; loop r
+  in
+  match loop t with
+  | () -> false
+  | effect Found() -> true
+#+END_SRC
+#+RESULTS:
+
+* Future work
+** More regions
+
+#+BEGIN_SRC ocaml :eval never
+type @r file
+effect @r file_access
+
+val read : @r file -[@r file_access]-> string
+val write : @r file ->> string -[@r file_access]-> unit
+
+type 'a with_file = { f : @r. @r file -[@r file_access]-> 'a }
+
+val with_file : Filename.t -> 'a with_file -> 'a
+#+END_SRC
+
+* Future work
+** More regions
+
+#+BEGIN_SRC ocaml :eval never
+val ref : 'a -[@r create]-> ('a, @r) rref
+val ( ! ) : ('a, @r) rref -[@r read]-> 'a
+val ( := ) : ('a, @r) rref -[@r write]-> 'a
+
+module type Init = sig
+  type @r result
+  val init : unit -[@r state]-> @r result
+end
+
+module Freeze (Init : Init) : sig
+  val result : immutable Init.result
+end
+#+END_SRC
+
+* Future work
+** Multihandlers
+
+#+BEGIN_SRC ocaml :eval never
+let pipe f g =
+  match f () and g () with
+  | x and y -> x, y
+  | effect Send(x) and effect Recieve(), k ->
+      continue k () (Some x)
+  | effect Send(s) and y ->
+      continue k () y
+  | x and effect Recieve() ->
+      continue k x None
+#+END_SRC
+
+* Future work
+** Multihandlers
+
+#+BEGIN_SRC ocaml :eval never
+let run f x =
+  match f x and 0 with
+  | res and _ -> res
+  | effect Get and s, k -> continue k s s
+  | effect Set(s') and _, k -> continue k () s'
+#+END_SRC

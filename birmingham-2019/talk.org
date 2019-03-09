@@ -1,0 +1,1141 @@
+#+TITLE: Designing an
+#+TITLE:  algebraic effect 
+#+TITLE:    system for OCaml
+
+#+AUTHOR: Leo White
+
+~Stephen Dolan, Matija Pretnar, Daniel Hillerström, KC Sivaramakrishnan~
+#+PROPERTY: header-args :results verbatim
+#+STARTUP: latexpreview
+#+LATEX_HEADER: \usepackage{bussproofs}
+#+LATEX_HEADER: \usepackage{multicol}
+#+LATEX_HEADER: \newcommand{\Et}{\mathrel{\Op{;}}}
+#+LATEX_HEADER: \newcommand{\HasType}{\mathrel{\Op{:}}}
+#+LATEX_HEADER: \newcommand{\HasEffect}{\mathrel{\Op{!}}}
+#+LATEX_HEADER: \newcommand{\VDash}{\mathrel{\Op{\vdash}}}
+#+LATEX_HEADER: \newcommand{\Row}{\ensuremath{\Delta}}
+#+LATEX_HEADER: \newcommand{\RowTo}{\xrightarrow{\Row}}
+#+LATEX_HEADER: \newcommand{\Eff}{\ensuremath{\epsilon}}
+#+LATEX_HEADER: \newcommand{\Keyword}[1]{{\color{blue}{\texttt{#1}}}}
+#+LATEX_HEADER: \newcommand{\Equal}[2]{{#1}\mathrel{\Op{\cong}}{#2}}
+#+LATEX_HEADER: \newcommand{\Or}{\mathbin{|}}
+#+LATEX_HEADER: \newcommand{\Var}[1]{#1}
+#+LATEX_HEADER: \newcommand{\Context}{\Var{\Gamma}}
+#+LATEX_HEADER: \newcommand{\Text}[1]{\texttt{#1}}
+#+LATEX_HEADER: \newcommand{\Rvar}{\ensuremath{\rho}}
+
+* Algebraic effects
+
+ - Algebraic effects originally introduced to study
+   the semantics of computational effects.
+
+     ~Algebraic Operations and Generic Effects~
+       /Plotkin and Power, 2002/
+
+ - The addition of handlers turned them into a construct
+   for implementing such effects.
+
+     ~Handlers of Algebraic Effects~
+       /Plotkin and Pretnar, 2009/
+
+* Algebraic effects
+
+#+BEGIN_SRC ocaml :eval never
+    match ... raise E e with
+    | x -> x
+    | exception E x ->
+        ...
+#+END_SRC
+
+* Algebraic effects
+
+#+BEGIN_SRC ocaml :eval never
+    match ... perform E e .... with
+    | x -> x
+    | effect E x, k ->
+        ... continue k e ....
+#+END_SRC
+
+* State
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let factorial n =
+  perform (Set 1);
+  for i = 1 to n do
+    let x = perform Get in
+    perform (Set (x * i));
+  done;
+  perform Get
+#+END_SRC
+#+RESULTS:
+
+* State
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let run f x =
+  let comp =
+    match f x with
+    | res -> fun _ -> res
+    | effect Get k -> fun (s : int) -> (continue k s) s
+    | effect (Set s') k -> fun _ -> (continue k ()) s'
+  in
+  comp 0
+
+let x = run factorial 5
+#+END_SRC
+#+RESULTS:
+
+* Concurrency
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let rec foo id depth =
+  if depth > 0 then begin
+    Printf.printf "Forking %d\n" (id * 2 + 1);
+    perform (Fork (fun () -> foo (id * 2 + 1) (depth - 1)));
+    Printf.printf "Forking %d\n" (id * 2 + 2);
+    perform (Fork (fun () -> foo (id * 2 + 2) (depth - 1)))
+  end else begin
+    Printf.printf "Yielding in %d\n" id;
+    perform Yield;
+    Printf.printf "Resumed number %d\n" id;
+  end
+#+END_SRC
+#+RESULTS:
+
+* Concurrency
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let schedule f =
+  let run_q = Queue.create () in
+  let rec fork f =
+    match f () with
+    | () ->
+        if Queue.is_empty run_q then ()
+        else continue (Queue.pop run_q) ()
+    | effect Yield k ->
+        Queue.push k run_q; continue (Queue.pop run_q) ()
+    | effect (Fork f) k ->
+        Queue.push k run_q; fork f
+  in
+  fork f
+#+END_SRC
+#+RESULTS:
+
+* Concurrency
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let () = schedule (fun () -> foo 0 3)
+#+END_SRC
+#+RESULTS:
+
+* Syntax
+
+#+BEGIN_SRC ocaml :eval never
+               e ::= ...
+
+                     perform E e?
+
+                     match e with
+                     | x -> e
+                     | effect E x?, x -> e
+
+                     continue e e
+#+END_SRC
+
+* Semantics
+
+#+BEGIN_SRC ocaml :eval never
+      v ::= ...                   (values)
+      r ::= v | effect E v v      (results)
+      C ::= ...                   (delimited contexts)
+#+END_SRC
+
+
+\begin{equation*}
+{\color{black}.}\hspace{7em}
+\mathcal{C}[\Keyword{perform}\;E\;v] \longrightarrow
+            \Keyword{effect}\;E\;v\;(\lambda x . \mathcal{C}[x])
+\end{equation*}
+
+
+\begin{equation*}
+{\color{black}.}\hspace{7em}
+\Keyword{continue}\;v\;v^\prime \longrightarrow v\;v^\prime
+\end{equation*}
+
+* Semantics
+
+
+
+
+\begin{equation*}
+{\color{black}.}\hspace{7em}
+\begin{aligned}
+ & \Keyword{match} \; v \; \mathtt{with} \\
+ & | \; x \; \Text{->} \; e \\
+ & | \; \Keyword{effect} \; E_i \; x_i\Text{,} \; k_i \;
+     \Text{->} \; e^\prime_i
+\end{aligned}
+\longrightarrow
+e[v/x]
+\end{equation*}
+
+* Semantics
+
+\begin{equation*}
+{\color{black}.}\hspace{7em}
+\begin{aligned}
+ & \Keyword{match} \; \Keyword{effect}\;E\;v\;v^\prime \; \Keyword{with} \\
+ & \Text{|} \; x \; \Text{->} \; e \\
+ & \Text{|} \; \Keyword{effect} \; E_i \; x_i \Text{,} \; k_i \;
+     \Text{->} \; e^\prime_i
+\end{aligned}
+\longrightarrow
+e^\prime_j[v/x_j, v_{cont}/k_j]
+\end{equation*}
+
+       where
+\begin{equation*}
+{\color{black}.}\hspace{7em}
+E = E_j
+\end{equation*}
+
+\begin{equation*}
+{\color{black}.}\hspace{7em}
+v_{cont} = \lambda y.
+\begin{aligned}
+ & \Keyword{match} \; v^\prime y \; \Keyword{with} \\
+ & \Text{|} \; x \; \Text{->} \; e \\
+ & \Text{|} \; \Keyword{effect} \; E_i \; x_i \Text{,} \; k_i \;
+     \Text{->} \; e^\prime_i
+\end{aligned}
+\end{equation*}
+
+* Affine effects
+
+      Restrict continuations to be continued at most once
+
+      - One-shot continuations can be implemented more efficiently
+
+      - Simplifies code managing resources
+
+      - Multi-shot continuations incompatible with optimisations
+        performed by the OCaml compiler
+
+* Discontinue
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+      match perform Get with
+      | x -> x
+      | effect Get k ->
+          discontinue k (Failure "Get what?")
+#+END_SRC
+#+RESULTS:
+
+* Default handlers
+
+#+BEGIN_SRC ocaml :session old :cmd ~/Repositories/ocaml-old-effects/_install/bin/ocaml
+effect print = Print : string -> unit
+  with function Print s -> print_endline s;;
+
+let () = perform Print "Hello"
+
+let () =
+  try perform Print "Hello" with
+  | effect Print s, k ->
+      print_endline (s ^ " World");
+      continue k ()
+#+END_SRC
+#+RESULTS:
+
+* Implementation
+
+#+BEGIN_SRC ocaml :eval never
+           match ...body... with
+           | x -> ...return...
+           | effect E, k -> ...handler...
+#+END_SRC
+
+- Entering an effect handler creates a fresh stack
+
+- These stacks are heap allocated and dynamically resized
+  (~10s of bytes initially)
+
+- Performing an effect wraps the current stack in a continuation
+  and executes the handler on the previous stack
+
+- Continuing a continuation reinstantes the paused stack and
+  resumes its execution
+
+* Relating effects to handlers
+
+  What are operations and how do we know which
+  enclosing handler should be used for a given
+  operation?
+
+* Nominative effects
+
+  Equivalence of effects determined by the name of their declaration
+
+#+BEGIN_SRC ocaml :session old :cmd ~/Repositories/ocaml-old-effects/_install/bin/ocaml
+module Int_state = struct
+  effect e =
+    | Get : int
+    | Set : int -> unit
+end
+
+let incr () =
+  perform Int_state.Set (perform Int_state.Get)
+#+END_SRC
+#+RESULTS:  
+
+* Nominative effects
+
+#+BEGIN_SRC ocaml :session old :cmd ~/Repositories/ocaml-old-effects/_install/bin/ocaml
+module Int_state2 = struct
+  effect e =
+    | Get : int
+    | Set : int -> unit
+end
+
+let () =
+  try incr () with
+  | effect Int_state2.Get, _ -> ()
+  | effect Int_state2.Set _, _ -> ()
+#+END_SRC
+#+RESULTS:  
+
+* Allows abstraction
+
+#+BEGIN_SRC ocaml :session old :cmd ~/Repositories/ocaml-old-effects/_install/bin/ocaml
+module type St = sig
+  effect e
+  val incr : unit -[e]-> unit
+end
+
+module Incr_twice (St : St) = struct
+  let f () = St.incr (); St.incr ()
+end
+
+module Int_incr = struct
+  effect e = Int_state.e
+  let incr = incr
+end
+
+module M = Incr_twice(Int_incr)
+#+END_SRC
+#+RESULTS:  
+
+* Prohits parameterisation
+
+#+BEGIN_SRC ocaml :eval never
+effect 'a state =
+  | Get : 'a
+  | Put : 'a -> unit
+
+module M : sig
+  effect 'a state2
+  val pfrm : unit -[int state2]-> unit
+  val handle : ('a -[int state2 | !p]-> 'b) ->
+                 'a -[!p]-> 'b
+end = struct
+  effect 'a state2 = 'a state
+  let pfrm () = perform Put 0
+  let handle f x =
+    match f x with
+    | y -> y
+    | effect Get, k = continue k 0
+    | effect Put _, k = continue k ()
+end
+#+END_SRC
+
+* Prohibits parameterisation
+
+#+BEGIN_SRC ocaml :eval never
+let _ =
+  M.handle (fun () ->
+    let comp =
+      match M.pfrm (); perform Get with
+      | x -> fun _ -> x
+      | effect Get, k ->
+          fun s -> continue k s s
+      | effect Put s, k ->
+          fun _ -> continue k () s
+    in
+    print_string (comp "init"))
+#+END_SRC
+
+* Structural operations
+
+  Equivalence of effects determined by their structure
+
+#+BEGIN_SRC ocaml :session simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let incr () : unit =
+  perform Set((perform Get()))
+#+END_SRC
+#+RESULTS:  
+
+* Allows parameterisation
+
+#+BEGIN_SRC ocaml :session simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+effect 'a state = ![ Set : 'a -> unit | Get : 'a]
+#+END_SRC
+#+RESULTS:  
+
+* Prohibits abstraction
+
+#+BEGIN_SRC ocaml :session simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+module State : sig
+  effect 'a e
+  val incr : unit -['a e]-> unit
+end = struct
+  effect 'a e = ![ Set : 'a -> unit | Get : 'a]
+  let incr () = perform Set((perform Get()))
+end
+
+let foo () = State.incr (); perform Foo()
+#+END_SRC
+#+RESULTS:  
+
+* Labelled effects
+
+    Separate the type of the operations from the label used
+    for effect equality.
+
+#+BEGIN_SRC ocaml :session new :cmd ~/Repositories/ocaml-effects-new/_install/bin/ocaml
+module State = struct
+  effect type 'a e =
+    | Get : 'a
+    | Set : 'a -> unit
+end
+
+let incr () =
+  perform Counter#State.Set((perform Counter#State.Get()))
+#+END_SRC
+#+RESULTS:  
+
+* Labelled effects
+
+#+BEGIN_SRC ocaml :session new :cmd ~/Repositories/ocaml-effects-new/_install/bin/ocaml
+let with_counter f x =
+  let comp =
+    match f x with
+    | res -> fun _ -> res
+    | effect Counter#State.Get, k ->
+        fun (s : int) -> (continue k s) s
+    | effect Counter#Set s', k ->
+        fun _ -> (continue k ()) s'
+  in
+  comp 0
+#+END_SRC
+#+RESULTS:  
+
+* Allows abstraction
+
+#+BEGIN_SRC ocaml :session new :cmd ~/Repositories/ocaml-effects-new/_install/bin/ocaml
+module type St = sig
+  effect type e
+  val incr : unit -[Counter : e]-> unit
+end
+
+module Incr_twice (St : St) = struct
+  let f () = St.incr (); St.incr ()
+end
+
+module Int_incr = struct
+  effect type e = int State.e
+  let incr = incr
+end
+
+module M = Incr_twice(Int_incr)
+#+END_SRC
+#+RESULTS:
+
+* Leaking effects
+
+#+BEGIN_SRC ocaml :session new :cmd ~/Repositories/ocaml-effects-new/_install/bin/ocaml
+let matching p l =
+  let rec loop = function
+    | [] -> perform Counter#Get
+    | x :: xs ->
+        if p x then incr ();
+        loop xs
+  in
+  with_counter loop l
+#+END_SRC
+#+RESULTS:
+
+* Shift
+
+  Allow multiple occurances of each label.
+
+  Manipulate the later occurances with a ~shift~ construct.
+
+#+BEGIN_SRC ocaml :session new :cmd ~/Repositories/ocaml-effects-new/_install/bin/ocaml
+let shift_counter f =
+  shift Counter (f ())
+#+END_SRC
+#+RESULTS:
+
+* Prevents leaking
+
+#+BEGIN_SRC ocaml :session new :cmd ~/Repositories/ocaml-effects-new/_install/bin/ocaml
+let matching p l =
+  let rec loop = function
+    | [] -> perform Counter#Get
+    | x :: xs ->
+        if shift Counter (p x) then incr ();
+        loop xs
+  in
+  with_counter loop l
+#+END_SRC
+#+RESULTS:
+
+* Effect coercions
+                                /(Biernacki et al.)/
+
+  Allow effect labels to be abstracted and provide coercions
+  to explicitly manipulate effects.
+
+  Natural generalisation of the ~shift~ construct.
+
+  The effect coercions are essentially:
+    - ~shift~ : [e] => [e | Eff : et]
+    - ~swap~ : [e | Eff1 : et1 | Eff2 : et2]
+                 => [e | Eff2 : et2 | Eff1 : et1]
+
+* Computation trees
+
+  We can represent effectful computations as trees
+
+#+BEGIN_SRC ocaml :eval never
+    effect choose = Choose : bool
+
+    let drunk_coin () =
+      if perform C#Choose then
+        if perform C#Choose then Some "heads" else Some "tails"
+      else None
+#+END_SRC
+
+  ~drunk_coin~ can be seen as a function that returns the tree:
+#+BEGIN_SRC ocaml :eval never
+
+     C#Choose(C#Choose(Some "heads", Some "tails"), None)
+#+END_SRC
+
+  The operation ~C#Choose : bool~ becomes an algebraic operation of arity 2
+  (or equivalently of arity ~bool~). Such algebraic operations may have
+  infinite arities.
+
+* Computation trees
+
+  Handlers are then a form of substitution on computations.
+
+#+BEGIN_SRC ocaml :eval never
+    let all f =
+      match f () with
+      | x -> [x]
+      | effect C#Choose, k ->
+          continue k true @ continue k false
+#+END_SRC
+
+  ~all~ takes the computation returned by ~f~ and substitutes
+#+BEGIN_SRC
+    C#Choose(x, y)  :->  x @ y
+#+END_SRC
+  and substitutes all leafs of the tree:
+#+BEGIN_SRC
+    x  :->  [x]
+#+END_SRC
+
+* Open terms
+
+  From this perspective, effectfull computations are simply
+  open terms.
+
+  Managing effectful computations amounts to manipulating
+  open terms.
+
+  A well-studied problem. Can we re-use existing approaches?
+
+  Treat effect labels as *names* and use operations from
+  *nominal techniques* based on permutations and fresh name
+  generation.
+
+* Nominal effects
+
+  A *label* l_i consists of a name ~l~ from some countable set
+  of names and an index ~i~ a natural number.
+
+  A *row* is a finite map from labels to effect types.
+
+  We write rows as a sequence of pairs of names and effect types, using
+  the special symbol ~0~ to indicate absence of a label:
+
+      [ Foo : 0; Bar : io; Foo : string state ]
+
+  is equivalent to:
+
+      Bar_0 \to io
+      Foo_1 \to string state
+
+* Nominal effects
+
+  We take *renamings* as the fundamental operation on labels.
+
+  An *atomic renaming* ~l \rArr l\prime~ is a permutation of labels which is the identity
+  on labels with names other than ~l~ or ~l\prime~:
+
+      (l \rArr l\prime) l_0 = l\prime_0
+      (l \rArr l\prime) l\prime_n = l\prime_{n+1}
+      (l \rArr l\prime) l_{n+1} = l_n
+
+  These play the same role as swappings in standard nominal techniques.
+
+    (Foo \rArr Bar) [ Foo : A; Bar : B; Foo : C ]
+              = [ Bar : A; Bar : B; Foo : C ]
+
+  Atomic renamings generate a group under composition, as the inverse of
+  ~l \rArr l\prime~ is ~l\prime\rArr l~. We call this group the renamings.
+
+* Nominal effects
+
+  Given a fresh name we can generate a number of useful renamings on rows:
+
+    ~l \hArr l\prime~ swaps l_0 and l\prime_0 leaving all other labels unchanged
+
+    ~\uarr{}l~ shifts all l_n to l_{n+1} setting l_0 to 0
+
+    ~\darr{}l~ unshifts all l_{n+1} to l_n -- requires that l_0 be 0
+
+    ~l,r~ where ~r~ is a renaming applies ~r~ one level of ~l~ deeper
+
+* Nominal effects
+
+  Renamings can be applied to a computation to manage the free operations
+  of the computation.
+
+#+BEGIN_SRC ocaml :eval never
+    match
+      (Foo \rArr Bar) perform Foo#Read
+    with
+    | x -> x
+    | effect Bar#Read, k ->
+        continue k 5
+#+END_SRC
+
+* Nominal effects
+
+  We support the generation of names:
+
+#+BEGIN_SRC ocaml :eval never
+    effect type exn = Throw : .
+
+    let exists p l =
+      let new name exit in
+      match
+        List.iter (fun x -> if p x then perform exit#Throw)
+      with
+      | () -> false
+      | effect exit#Throw -> true
+#+END_SRC
+
+* Nominal effects
+
+  We support abstraction over fresh names
+
+#+BEGIN_SRC ocaml :eval never
+    type !r traceable =
+      { run : !!e. (new name n)
+                   -> (unit -[n : !!e]-> unit)
+                   -[n : !!e; !r]-> unit }
+
+    effect type count = Count : unit
+
+    let trace : !r traceable -[!r]-> int =
+      fun t ->
+        let new name trace in
+        let count = ref 0 in
+        match t.run (name trace) (fun () -> perform trace#Count) with
+        | () -> !count
+        | effect exit#Count, k -> incr count; continue k ()
+#+END_SRC
+   
+* Nominal effects
+
+  We support abstraction over non-fresh names.
+
+#+BEGIN_SRC ocaml :eval never
+    let with_state (name s) f x =
+      let comp =
+        match f x with
+        | res -> fun _ -> res
+        | effect s#State.Get, k ->
+            fun (s : int) -> (continue k s) s
+        | effect s#State.Set s', k ->
+            fun _ -> (continue k ()) s'
+      in
+      comp 0
+
+    let with_counter f x =
+      with_state (name Counter) f x
+#+END_SRC
+#+RESULTS:
+
+* Nominal effects
+
+  Non-fresh names are quite restrictive because they cannot be automatically
+  reordered relative to other names.
+
+    [ Foo : A, l : B ] \neq [ l : B, Foo : A ]
+
+  However, with renamings we can simply replace the abstract
+  name with a fresh one.
+
+* Typing algebraic effects
+
+  How do we create a usable type system for algebraic effects?
+
+  How do we ensure such a system is backwards compatible with OCaml?
+
+* Unhandled effects
+
+Effects may not be handled
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+let x = factorial 5
+#+END_SRC
+#+RESULTS:
+
+* Hidden concurrency
+
+Important effects are not visible in the types of values
+
+#+BEGIN_SRC ocaml :session multi :cmd ~/Repositories/ocaml-multicore/_install/bin/ocaml
+#show foo
+#+END_SRC
+#+RESULTS:
+
+OCaml users are used to seeing concurrency in types via monads
+
+* Requirements
+
+ - Soundness :: 
+      If a computation receives a type ~A ! \Delta~, every potential effect
+      ~e~ should be captured in ~\Delta~.
+
+ - Usefulness ::
+      An effect system that annotates each program with every possible
+      effect there is, is obviously sound, but not very useful. Thus, an
+      effect information should not mention an effect that is guaranteed not
+      to happen.
+
+  - Backwards compatibility ::
+      We want each program that was typable before introducing effects to
+      remain typable.
+
+* Requirements
+
+
+#+BEGIN_SRC ocaml :eval never
+      perform Foo
+#+END_SRC
+
+
+
+#+BEGIN_SRC ocaml :eval never
+      if e then perform Foo
+      else perform Bar
+#+END_SRC
+
+* Row polymorphism
+
+#+BEGIN_SRC ocaml :eval never
+          \Delta ::= [ \epsilon | \Delta ] \brvbar [ \Delta ] \brvbar [ ]
+#+END_SRC
+
+\begin{equation*}
+{\color{black}.}\hspace{7em}
+\Equal{[\Eff \Or \Eff^\prime \Or \Row]}
+      {[\Eff^\prime \Or \Eff \Or \Row]}
+\end{equation*}
+
+\begin{prooftree}
+{\color{black}.}\hspace{7em}
+\AxiomC{$\Equal{\Row}{\Row^\prime}$}
+\alwaysSingleLine
+\UnaryInfC{$\Equal{[\Eff \Or \Row]}{[\Eff \Or \Row^\prime]}$}
+\end{prooftree}
+
+#+BEGIN_SRC ocaml :eval never
+    let raise msg = perform Raise msg;;
+
+    val raise : string -[exn | !p]-> unit
+#+END_SRC
+
+* Row polymorphism
+
+
+\begin{prooftree}
+{\color{black}.}\hspace{1em}
+\alwaysNoLine
+\AxiomC{$\Context \VDash \Var{e} \HasType \Var{A}
+         \HasEffect [\Var{\Eff} \Or \Var{\Row}]$}
+\UnaryInfC{$\Context \Et \Var{x} \HasType \Var{A} \VDash \Var{e^\prime}
+            \HasType \Var{B} \HasEffect \Var{\Row}$}
+\AxiomC{$\Eff = \big\{ E_i \HasType \Var{C_i} \to \Var{D_i} \big\}$}
+\UnaryInfC{$\Context \Et \Var{x_i} \HasType \Var{C_i} \Et \Var{k_i} \HasType
+            \Text{(} \Var{D_i} \Text{,} \Var{B} \Text{)} \,\Text{cont} \VDash
+            \Var{e^{\prime\prime}_i} \HasType \Var{B} \HasEffect \Var{\Row}$}
+\alwaysSingleLine
+\BinaryInfC{$\Context \VDash
+            \begin{aligned}
+           & \Keyword{match} \; \Var{e} \; \Keyword{with} \\
+           & \Text{|} \; \Var{x} \; \Text{->} \; \Var{e^\prime} \\
+           & \Text{|} \; \Keyword{effect} \; E_i \; \Var{x_i} \Text{,}
+               \; \Var{k_i} \; \Text{->} \; \Var{e^{\prime\prime}_i}
+            \end{aligned}
+            \HasType \Var{B} \HasEffect \Var{\Row}$}
+\end{prooftree}
+
+* Row polymorphism
+
+#+BEGIN_SRC ocaml :eval never
+  let run f =
+    match f () with
+    | ret -> Ok ret
+    | effect Raise msg, k -> Error msg
+
+  val run : (unit -[exn | !p]-> 'a)
+              -[!p]-> ('a, string) result
+#+END_SRC
+
+* Row polymorphism
+
+#+BEGIN_SRC ocaml :eval never
+val old_fun : int -> int
+#+END_SRC
+
+#+BEGIN_SRC ocaml :eval never
+let new_fun p =
+  if p then old_fun 10
+  else perform Get
+#+END_SRC
+
+#+BEGIN_EXAMPLE
+Error: This expression performs effect [state| !r], but
+       it was expected to perform [].
+#+END_EXAMPLE
+
+* Row polymorphism
+
+#+BEGIN_SRC ocaml :eval never
+type t = int -> int
+#+END_SRC
+
+#+BEGIN_EXAMPLE
+Error: Unbound type parameter !r.
+#+END_EXAMPLE
+
+* Opening
+
+\begin{prooftree}
+{\color{black}.}\hspace{2em}
+\AxiomC{$\Context \VDash \Var{e}
+         \HasType \forall \Var{\overline{\alpha}} \Var{\overline{\Rvar}}.
+         \Var{A} \HasEffect \Var{\Row}$}
+\AxiomC{$open^+(\Var{A}) = \forall \Var{\overline{\Rvar^\prime}} . \Var{B}$}
+\alwaysSingleLine
+\BinaryInfC{$\Context \VDash \Var{e}
+             \HasType \Var{B}[
+             \Var{\overline{C}} / \Var{\overline{\alpha}},
+             \Var{\overline{\Row^\prime}} / \Var{\overline{\Rvar}},
+             \Var{\overline{\Row^{\prime\prime}}} / \Var{\overline{\Rvar^\prime}} ]
+             \HasEffect \Var{\Row}$}
+\end{prooftree}
+
+\begin{align*}
+{\color{black}.}\hspace{3em}
+&open^+([ \Eff_1 | \ldots | \Eff_n ]) =
+  \forall \Rvar . [ \Eff_1 | \ldots | \Eff_n | \Rvar ] \\
+&open^+(A \RowTo B) =
+  open^-(A) \xrightarrow{open^+{\Row}} open^+(B) \\
+&\ldots
+\end{align*}
+
+\begin{align*}
+{\color{black}.}\hspace{3em}
+&open^-([ \Eff_1 | \ldots | \Eff_n ]) =
+  [ \Eff_1 | \ldots | \Eff_n ] \\
+&open^-(A \RowTo B) =
+  open^+(A) \xrightarrow{open^-{\Row}} open^-(B) \\
+&\ldots
+\end{align*}
+
+* Opening
+
+#+BEGIN_SRC ocaml :eval never
+val old_fun : int -> int
+#+END_SRC
+
+#+BEGIN_SRC ocaml :eval never
+let new_fun p =
+  if p then old_fun 10
+  else perform Get
+#+END_SRC
+
+#+BEGIN_SRC ocaml :eval never
+val new_fun : bool -[state | !p]-> int
+#+END_SRC
+
+* Closing
+
+\begin{prooftree}
+{\color{black}.}\hspace{2em}
+\AxiomC{$\Context \VDash \Var{e} \HasType \Var{A} \HasEffect []$}
+\AxiomC{$\Var{\overline{\alpha}} \Var{\overline{\Rvar}} \notin ftv(\Context)$}
+\AxiomC{$close^+(
+         \forall \Var{\overline{\alpha}} \Var{\overline{\Rvar}} .
+         \Var{A}) =
+         \forall \Var{\overline{\alpha}} \Var{\overline{\Rvar^\prime}} .
+         \Var{B}$}
+\alwaysSingleLine
+\TrinaryInfC{$\Context \VDash \Var{e}
+             \HasType \forall \Var{\overline{\alpha}} \Var{\overline{\Rvar^\prime}} .
+             \Var{B}
+             \HasEffect \Var{\Row}$}
+\end{prooftree}
+
+\begin{equation*}
+{\color{black}.}\hspace{3em}
+close^+(\forall \overline{\alpha} \overline{\Rvar} .A) =
+  \forall \overline{\alpha} \overline{\Rvar} .
+    A[\overline{[]} / closable^+(A, \overline{\Rvar})]
+\end{equation*}
+
+\begin{align*}
+{\color{black}.}\hspace{1em}
+&closable^+(\Row, \overline{\Rvar}) = \overline{\Rvar} \\
+&closable^+(A \RowTo B, \overline{\Rvar}) =
+  closable^-(A, \overline{\Rvar})
+  \cap closable^+{\Row}
+  \cap closable^+(B) \\
+&\ldots
+\end{align*}
+
+\begin{align*}
+{\color{black}.}\hspace{1em}
+&closable^-([ \Eff_1 | \ldots | \Eff_n | \Rvar ], \overline{\Rvar}) =
+  \overline{\Rvar} \setminus \Rvar \\
+&closable^-(A \RowTo B, \overline{\Rvar}) =
+  closable^+(A, \overline{\Rvar})
+  \cap closable^-(\Row)
+  \cap closable^-(B) \\
+&\ldots
+\end{align*}
+
+* Closing
+
+#+BEGIN_SRC ocaml :eval never
+    let raise msg = perform Raise msg;;
+
+    val raise : string -[exn]-> unit
+#+END_SRC
+
+* Useful short-hands
+
+#+BEGIN_SRC ocaml :eval never
+    ->    =    -[]->
+
+    ~>    =    -[!~]->
+#+END_SRC
+
+#+BEGIN_SRC ocaml :eval never
+val map : ('a ~> 'b) -> 'a list ~> 'b list
+#+END_SRC
+
+* Row polymorphism
+
+#+BEGIN_SRC ocaml :session simple :cmd ~/Repositories/ocaml-effects-simple/_install/bin/ocaml
+let rec foo () =
+  match perform Get() + foo () with
+  | x -> x
+  | effect Get(), k -> continue k 5
+#+END_SRC
+
+#+RESULTS:
+
+* Algebraic subtyping
+
+    ~Algebraic Subtyping~
+       /Stephen Dolan, 2016/
+
+  If you are careful with how you setup your type algebra
+  then there is principal type inference for ML with the
+  classic subsumption rule.
+
+\begin{prooftree}
+{\color{black}.}\hspace{4em}
+\AxiomC{$\Context \VDash \Var{e} \HasType \Var{A} \HasEffect \Var{\Row}$}
+\AxiomC{$\Subtype{\Var{A}}{\Var{B}}$}
+\alwaysSingleLine
+\BinaryInfC{$\Context \VDash \Var{e} \HasType \Var{B} \HasEffect \Var{\Row}$}
+\end{prooftree}    
+
+  Along with:
+  - simple types (no constraints)
+  - a decidable subsumption algorithm for type schemes.
+
+* Algebraic subtyping
+
+  - The type algebra is constructed as a lattice with meet, join,
+    top and bottom.
+
+  - We distinguish positive (covariant) and negative (contravariant)
+    positions.
+
+  - Principal types only ever need:
+
+      + join and bottom in positive positions
+
+      + meet and top in negative positions
+
+  - Replace unification and substitution with *biunification* and
+    *bisubstitutions*.
+
+    + bisubstitutions replace variables with different types in positive
+      and negative positions
+
+    + biunification works on subtyping constraints rather than equalities
+
+* Algebraic subtyping
+
+  However, there is a key restriction:
+
+#+BEGIN_EXAMPLE
+    No invariant contexts for types
+#+END_EXAMPLE
+
+  So no type constructors with invariant parameters:
+
+#+BEGIN_SRC ocaml :eval never
+    type 'a ref = { mutable contents : 'a }
+#+END_SRC
+
+  Consider
+
+#+BEGIN_SRC ocaml :eval never
+    let foo_ref () = ref Foo
+#+END_SRC
+
+  What type does it have?
+
+#+BEGIN_SRC ocaml :eval never
+    val foo_ref : unit -> [ Foo ] ref
+    val foo_ref : unit -> [ Foo | Bar ] ref 
+#+END_SRC
+
+
+* Ranges
+
+  We can support invariant contexts through the use of *ranges*
+
+  Instead of type schemes:
+
+    \forall a_1 : k_n, ... a_n : k_n . t
+
+  we give the type variables a subtyping range:
+
+    \forall a_1 : t_1 -- t\prime_1 : k_1, ... a_n : t_n -- t\prime_n : k_n. t
+
+  where ~a : t -- t\prime : k~ means that ~t <: a <: t\prime~ all of which
+  have kind ~k~
+
+  Inference is a form of unification that is somewhere between
+  traditional unification and biunification.
+
+* Ranges
+
+#+BEGIN_SRC ocaml :eval never
+    let foo_ref () = ref Foo
+#+END_SRC
+
+  Can now be given the type:
+
+#+BEGIN_SRC ocaml :eval never
+    val foo_ref : 'a : [ Foo ] -- T . unit -> 'a ref
+#+END_SRC
+
+  Which is more general than both of:
+
+#+BEGIN_SRC ocaml :eval never
+    val foo_ref : unit -> [ Foo ] ref
+    val foo_ref : unit -> [ Foo | Bar ] ref
+#+END_SRC
+
+  With a little syntactic sugar, this can be written as:
+
+#+BEGIN_SRC ocaml :eval never
+    val foo_ref : unit -> +[Foo] ref
+#+END_SRC
+
+* Row subtyping
+
+  One particular use of ranges is what I call *row subtyping*.
+
+  Make all contexts of type ~type~ invariant, with all covariant
+  and contravariant contexts being of kind ~effect~.
+
+  This restricts subtyping to only work within effects.
+
+  Less expressive than full subtyping, but more expressive than
+  row polymorphism.
+
+  Capable of expressing genuine subtyping relations between effects.
+
+  A less invasive change for an existing language like OCaml.
+
+* Tracking purity
+
+  Define a built-in abstract effect type:
+
+#+BEGIN_SRC ocaml :eval never
+    effect type io
+#+END_SRC
+
+  Treat OCaml's built-in side-effects as performing it:
+
+#+BEGIN_SRC ocaml :eval never
+    val ref : 'a -[IO : io]-> 'a ref
+#+END_SRC
+
+  Redefine ~->~ to mean ~-[IO : io]->~ and introduce ~->>~
+  for ~-[]->~.
+
+  As with Haskell, divergence and raising exceptions are
+  still considered "pure".
+
+* Status
+
+** Nominal effects
+
+    - Paper in progress with Stephen Dolan
+
+** Subtyping with ranges
+
+    - Coq proof of soundness for row subtyping of
+      polymorphic variants
+
+    - Currently being updated for general ranges
+
+    - Aim to then proof principality of inference in Coq
+
+** Prototype implementation
+
+    - Just updated to use separate effect labels
+
+    - Support for nominal primitives still needed
+
+    - Inference based on row polymorphism with opening and closing
+
+    - Would like to switch to using row subtyping with opening and closing
